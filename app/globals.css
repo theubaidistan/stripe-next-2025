@@ -24,3 +24,12 @@ body {
   color: var(--foreground);
   font-family: Arial, Helvetica, sans-serif;
 }
+
+/* Smooth scale & fade effect for DaisyUI modal */
+.modal-box {
+  @apply transform transition-transform duration-300 scale-95 opacity-0;
+}
+
+.modal.modal-open .modal-box {
+  @apply scale-100 opacity-100;
+}
