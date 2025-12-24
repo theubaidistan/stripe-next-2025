@@ -1,75 +1,170 @@
+// import { NextRequest, NextResponse } from "next/server";
+// import { stripe } from "@/utils/stripe";
+// import { supabaseAdmin } from "@/utils/supabaseServer";
+// import Stripe from "stripe";
+
+// export async function POST(request: NextRequest) {
+//   try {
+//     const rawBody = await request.text();
+//     const signature = request.headers.get("stripe-signature");
+
+//     let event;
+//     try {
+//       event = stripe.webhooks.constructEvent(
+//         rawBody,
+//         signature!,
+//         process.env.STRIPE_WEBHOOK_SECRET!
+//       );
+//     } catch (error: any) {
+//       console.error(`Webhook signature verification failed: ${error.message}`);
+//       return NextResponse.json({ message: "Webhook Error" }, { status: 400 });
+//     }
+
+//     // Handle the checkout.session.completed event
+//     if (event.type === "checkout.session.completed") {
+//       const session: Stripe.Checkout.Session = event.data.object;
+//       console.log(session);
+//       const userId = session.metadata?.user_id;
+
+//       // Create or update the stripe_customer_id in the stripe_customers table
+//       const { error } = await supabaseAdmin.from("stripe_customers").upsert({
+//         user_id: userId,
+//         stripe_customer_id: session.customer,
+//         subscription_id: session.subscription,
+//         plan_active: true,
+//         plan_expires: null,
+//       });
+//     }
+
+//     //... omitted webhook signature verification
+
+//     if (event.type === "customer.subscription.updated") {
+//       const subscription: Stripe.Subscription = event.data.object;
+//       console.log(subscription);
+//       // Update the plan_expires field in the stripe_customers table
+//       const { error } = await supabaseAdmin
+//         .from("stripe_customers")
+//         .update({ plan_expires: subscription.cancel_at })
+//         .eq("subscription_id", subscription.id);
+//     }
+
+//     if (event.type === "customer.subscription.deleted") {
+//       const subscription = event.data.object;
+//       console.log(subscription);
+
+//       const { error } = await supabaseAdmin
+//         .from("stripe_customers")
+//         .update({ plan_active: false, subscription_id: null })
+//         .eq("subscription_id", subscription.id);
+//     }
+//     // In your Stripe webhook handler
+//     if (event.type === "invoice.payment_succeeded") {
+//       const invoice = event.data.object;
+
+//       // Reset monthly downloads at billing period start
+//       await supabaseAdmin
+//         .from("stripe_customers")
+//         .update({ monthly_downloads: 0 })
+//         .eq("stripe_customer_id", invoice.customer);
+//     }
+
+//     return NextResponse.json({ message: "success" });
+//   } catch (error: any) {
+//     return NextResponse.json({ message: error.message }, { status: 500 });
+//   }
+// }
+//*------------------------------------------------------------------------------------------
 import { NextRequest, NextResponse } from "next/server";
+import Stripe from "stripe";
 import { stripe } from "@/utils/stripe";
 import { supabaseAdmin } from "@/utils/supabaseServer";
-import Stripe from "stripe";
+
+export const runtime = "nodejs";
 
 export async function POST(request: NextRequest) {
+  const rawBody = await request.text();
+  const signature = request.headers.get("stripe-signature");
+
+  let event: Stripe.Event;
+
   try {
-    const rawBody = await request.text();
-    const signature = request.headers.get("stripe-signature");
+    event = stripe.webhooks.constructEvent(
+      rawBody,
+      signature!,
+      process.env.STRIPE_WEBHOOK_SECRET!
+    );
+  } catch (err: any) {
+    console.error("❌ Webhook signature error:", err.message);
+    return NextResponse.json({ error: "Invalid signature" }, { status: 400 });
+  }
 
-    let event;
-    try {
-      event = stripe.webhooks.constructEvent(
-        rawBody,
-        signature!,
-        process.env.STRIPE_WEBHOOK_SECRET!
-      );
-    } catch (error: any) {
-      console.error(`Webhook signature verification failed: ${error.message}`);
-      return NextResponse.json({ message: "Webhook Error" }, { status: 400 });
-    }
-
-    // Handle the checkout.session.completed event
+  try {
+    /* ---------------- checkout.session.completed ---------------- */
     if (event.type === "checkout.session.completed") {
-      const session: Stripe.Checkout.Session = event.data.object;
-      console.log(session);
+      const session = event.data.object as Stripe.Checkout.Session;
+
       const userId = session.metadata?.user_id;
+      if (!userId) {
+        console.error("❌ Missing user_id in metadata");
+        return NextResponse.json({ error: "Missing user_id" }, { status: 400 });
+      }
 
-      // Create or update the stripe_customer_id in the stripe_customers table
-      const { error } = await supabaseAdmin.from("stripe_customers").upsert({
-        user_id: userId,
-        stripe_customer_id: session.customer,
-        subscription_id: session.subscription,
-        plan_active: true,
-        plan_expires: null,
-      });
+      const { error } = await supabaseAdmin.from("stripe_customers").upsert(
+        {
+          user_id: userId,
+          stripe_customer_id: session.customer as string,
+          subscription_id: session.subscription as string,
+          plan_active: true,
+          plan_expires: null,
+        },
+        { onConflict: "user_id" }
+      );
+
+      if (error) {
+        console.error("❌ Supabase upsert error:", error);
+        return NextResponse.json({ error: "DB error" }, { status: 500 });
+      }
     }
 
-    //... omitted webhook signature verification
-
+    /* ---------------- subscription updated ---------------- */
     if (event.type === "customer.subscription.updated") {
-      const subscription: Stripe.Subscription = event.data.object;
-      console.log(subscription);
-      // Update the plan_expires field in the stripe_customers table
-      const { error } = await supabaseAdmin
-        .from("stripe_customers")
-        .update({ plan_expires: subscription.cancel_at })
-        .eq("subscription_id", subscription.id);
-    }
+      const subscription = event.data.object as Stripe.Subscription;
 
-    if (event.type === "customer.subscription.deleted") {
-      const subscription = event.data.object;
-      console.log(subscription);
-
-      const { error } = await supabaseAdmin
-        .from("stripe_customers")
-        .update({ plan_active: false, subscription_id: null })
-        .eq("subscription_id", subscription.id);
-    }
-    // In your Stripe webhook handler
-    if (event.type === "invoice.payment_succeeded") {
-      const invoice = event.data.object;
-
-      // Reset monthly downloads at billing period start
       await supabaseAdmin
         .from("stripe_customers")
-        .update({ monthly_downloads: 0 })
+        .update({
+          plan_expires: subscription.cancel_at,
+          plan_active: subscription.status === "active",
+        })
+        .eq("subscription_id", subscription.id);
+    }
+
+    /* ---------------- subscription deleted ---------------- */
+    if (event.type === "customer.subscription.deleted") {
+      const subscription = event.data.object as Stripe.Subscription;
+
+      await supabaseAdmin
+        .from("stripe_customers")
+        .update({
+          plan_active: false,
+          subscription_id: null,
+        })
+        .eq("subscription_id", subscription.id);
+    }
+
+    /* ---------------- invoice paid ---------------- */
+    if (event.type === "invoice.payment_succeeded") {
+      const invoice = event.data.object as Stripe.Invoice;
+
+      await supabaseAdmin
+        .from("stripe_customers")
+        .update({ total_downloads: 0 })
         .eq("stripe_customer_id", invoice.customer);
     }
 
-    return NextResponse.json({ message: "success" });
-  } catch (error: any) {
-    return NextResponse.json({ message: error.message }, { status: 500 });
+    return NextResponse.json({ received: true });
+  } catch (err: any) {
+    console.error("❌ Webhook handler error:", err);
+    return NextResponse.json({ error: "Server error" }, { status: 500 });
   }
 }
